@@ -153,9 +153,57 @@
           </div>
         </section>
 
+        <section class="panel control-panel-section">
+          <div class="panel-header">
+            <h2>🎛️ 自动燃烧调节</h2>
+            <span class="panel-badge" :class="{ active: controlOutput?.enabled }">
+              {{ controlOutput?.enabled ? 'AUTO' : 'MANUAL' }}
+            </span>
+          </div>
+          <div class="panel-body">
+            <ControlPanel :controlOutput="controlOutput" @toggle="toggleControl" @setMode="setControlMode" />
+          </div>
+        </section>
+
+        <section class="panel optimizer-panel-section">
+          <div class="panel-header">
+            <h2>� 多工况效率优化</h2>
+          </div>
+          <div class="panel-body">
+            <OptimizerPanel :optimization="optimization" @setMode="setOperatingMode" />
+          </div>
+        </section>
+
+        <section class="panel emission-panel-section">
+          <div class="panel-header">
+            <h2>🌿 排放约束优化</h2>
+          </div>
+          <div class="panel-body">
+            <EmissionPanel :emission="emission" />
+          </div>
+        </section>
+
+        <section class="panel thermal-panel-section">
+          <div class="panel-header">
+            <h2>⚖️ 实时热负载平衡</h2>
+          </div>
+          <div class="panel-body">
+            <ThermalBalancePanel :balance="thermalBalance" />
+          </div>
+        </section>
+
+        <section class="panel ai-panel-section">
+          <div class="panel-header">
+            <h2>🤖 AI燃烧稳定控制</h2>
+          </div>
+          <div class="panel-body">
+            <AIStabilityPanel :aiStability="aiStability" @toggle="toggleAIStability" />
+          </div>
+        </section>
+
         <section class="panel alarm-panel">
           <div class="panel-header">
-            <h2>🚨 异常报警系统</h2>
+            <h2>�🚨 异常报警系统</h2>
             <span class="alarm-count" :class="{ active: activeAlarmCount > 0 }">
               {{ activeAlarmCount }} 条活跃报警
             </span>
@@ -181,17 +229,26 @@
 <script>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { wsService } from './services/websocket.js'
-import { fetchAlarms, acknowledgeAlarm, fetchSystemStatus } from './services/api.js'
+import { fetchAlarms, acknowledgeAlarm, fetchSystemStatus, enableControl, disableControl, setControlMode as apiSetControlMode, setOperatingMode as apiSetOperatingMode, enableAIStability, disableAIStability } from './services/api.js'
 import TemperatureHeatmap from './components/TemperatureHeatmap.vue'
 import CombustionGauge from './components/CombustionGauge.vue'
 import EfficiencyChart from './components/EfficiencyChart.vue'
 import SensorGrid from './components/SensorGrid.vue'
 import AlarmList from './components/AlarmList.vue'
 import TemperatureTrend from './components/TemperatureTrend.vue'
+import ControlPanel from './components/ControlPanel.vue'
+import OptimizerPanel from './components/OptimizerPanel.vue'
+import EmissionPanel from './components/EmissionPanel.vue'
+import ThermalBalancePanel from './components/ThermalBalancePanel.vue'
+import AIStabilityPanel from './components/AIStabilityPanel.vue'
 
 export default {
   name: 'App',
-  components: { TemperatureHeatmap, CombustionGauge, EfficiencyChart, SensorGrid, AlarmList, TemperatureTrend },
+  components: {
+    TemperatureHeatmap, CombustionGauge, EfficiencyChart, SensorGrid,
+    AlarmList, TemperatureTrend, ControlPanel, OptimizerPanel,
+    EmissionPanel, ThermalBalancePanel, AIStabilityPanel,
+  },
   setup() {
     const wsConnected = ref(false)
     const systemOnline = ref(false)
@@ -203,7 +260,11 @@ export default {
     const activeAlarmCount = ref(0)
     const currentTime = ref('')
     const tempHistory = ref([])
-    const startTime = Date.now()
+    const controlOutput = ref(null)
+    const optimization = ref(null)
+    const emission = ref(null)
+    const thermalBalance = ref(null)
+    const aiStability = ref(null)
 
     let timeInterval = null
     let statusInterval = null
@@ -263,18 +324,46 @@ export default {
         const res = await fetchAlarms(true, 20)
         alarms.value = res.data.alarms || []
         activeAlarmCount.value = res.data.count || 0
-      } catch (e) {
-        console.error('Failed to load alarms:', e)
-      }
+      } catch (e) {}
     }
 
     const handleAcknowledge = async (id) => {
       try {
         await acknowledgeAlarm(id)
         await loadAlarms()
-      } catch (e) {
-        console.error('Failed to acknowledge alarm:', e)
-      }
+      } catch (e) {}
+    }
+
+    const toggleControl = async () => {
+      try {
+        if (controlOutput.value?.enabled) {
+          await disableControl()
+        } else {
+          await enableControl()
+        }
+      } catch (e) {}
+    }
+
+    const setControlMode = async (mode) => {
+      try {
+        await apiSetControlMode(mode)
+      } catch (e) {}
+    }
+
+    const setOperatingMode = async (mode) => {
+      try {
+        await apiSetOperatingMode(mode)
+      } catch (e) {}
+    }
+
+    const toggleAIStability = async () => {
+      try {
+        if (aiStability.value?.enabled) {
+          await disableAIStability()
+        } else {
+          await enableAIStability()
+        }
+      } catch (e) {}
     }
 
     const addTempHistoryPoint = () => {
@@ -319,6 +408,26 @@ export default {
         activeAlarmCount.value++
       })
 
+      wsService.on('control_output', (data) => {
+        controlOutput.value = data
+      })
+
+      wsService.on('optimization', (data) => {
+        optimization.value = data
+      })
+
+      wsService.on('emission', (data) => {
+        emission.value = data
+      })
+
+      wsService.on('thermal_balance', (data) => {
+        thermalBalance.value = data
+      })
+
+      wsService.on('ai_stability', (data) => {
+        aiStability.value = data
+      })
+
       wsService.connect()
 
       updateTime()
@@ -343,6 +452,8 @@ export default {
       tempHistory, tempStats, instabilityPercent, stabilityClass,
       sensorCount, combustionEffArc, thermalEffArc, formatTemp,
       handleAcknowledge,
+      controlOutput, optimization, emission, thermalBalance, aiStability,
+      toggleControl, setControlMode, setOperatingMode, toggleAIStability,
     }
   },
 }
@@ -350,4 +461,28 @@ export default {
 
 <style>
 @import './styles/main.css';
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+.panel-badge.active {
+  background: rgba(0, 255, 136, 0.15);
+  color: var(--accent-green);
+  border-color: rgba(0, 255, 136, 0.3);
+}
+
+@media (max-width: 1400px) {
+  .dashboard-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 900px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+}
 </style>

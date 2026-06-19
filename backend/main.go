@@ -8,6 +8,7 @@ import (
 
 	"gas-turbine-combustion-ai/alarm"
 	"gas-turbine-combustion-ai/config"
+	"gas-turbine-combustion-ai/control"
 	"gas-turbine-combustion-ai/fusion"
 	"gas-turbine-combustion-ai/handler"
 	"gas-turbine-combustion-ai/sensor"
@@ -28,9 +29,19 @@ func main() {
 	fusionEngine := fusion.NewFusionEngine(cfg)
 	alarmManager := alarm.NewManager(cfg)
 
-	h := handler.NewHandler(simulator, fusionEngine, alarmManager, hub)
+	combustionCtrl := control.NewCombustionController()
+	effOptimizer := control.NewEfficiencyOptimizer()
+	emissionModel := control.NewEmissionModel()
+	thermalBalancer := control.NewThermalBalancer()
+	aiStabilityCtrl := control.NewStabilityController()
 
-	go dataPipeline(cfg, simulator, fusionEngine, alarmManager, hub)
+	h := handler.NewHandler(
+		simulator, fusionEngine, alarmManager, hub,
+		combustionCtrl, effOptimizer, emissionModel, thermalBalancer, aiStabilityCtrl,
+	)
+
+	go dataPipeline(cfg, simulator, fusionEngine, alarmManager, hub,
+		combustionCtrl, effOptimizer, emissionModel, thermalBalancer, aiStabilityCtrl)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
@@ -60,7 +71,18 @@ func main() {
 	}
 }
 
-func dataPipeline(cfg *config.Config, sim *sensor.Simulator, fusionEng *fusion.FusionEngine, alarmMgr *alarm.Manager, hub *ws.Hub) {
+func dataPipeline(
+	cfg *config.Config,
+	sim *sensor.Simulator,
+	fusionEng *fusion.FusionEngine,
+	alarmMgr *alarm.Manager,
+	hub *ws.Hub,
+	ctrl *control.CombustionController,
+	optimizer *control.EfficiencyOptimizer,
+	emission *control.EmissionModel,
+	balancer *control.ThermalBalancer,
+	aiStability *control.StabilityController,
+) {
 	interval := time.Duration(1000.0/cfg.AI.PredictionHz) * time.Millisecond
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -78,6 +100,21 @@ func dataPipeline(cfg *config.Config, sim *sensor.Simulator, fusionEng *fusion.F
 
 		efficiency := fusionEng.AnalyzeEfficiency()
 		hub.BroadcastMessage("efficiency", efficiency)
+
+		controlOutput := ctrl.Update(alignedReadings, field, state)
+		hub.BroadcastMessage("control_output", controlOutput)
+
+		optimResult := optimizer.Update(efficiency, state, field)
+		hub.BroadcastMessage("optimization", optimResult)
+
+		emissionResult := emission.Update(alignedReadings, field, efficiency)
+		hub.BroadcastMessage("emission", emissionResult)
+
+		balanceResult := balancer.Update(field)
+		hub.BroadcastMessage("thermal_balance", balanceResult)
+
+		aiStabilityResult := aiStability.Update(state, field, alignedReadings)
+		hub.BroadcastMessage("ai_stability", aiStabilityResult)
 
 		newAlarms := alarmMgr.Check(alignedReadings, state, efficiency)
 		for _, a := range newAlarms {
