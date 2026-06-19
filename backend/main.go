@@ -1,0 +1,101 @@
+package main
+
+import (
+	"fmt"
+	"log"
+	"net/http"
+	"time"
+
+	"gas-turbine-combustion-ai/alarm"
+	"gas-turbine-combustion-ai/config"
+	"gas-turbine-combustion-ai/fusion"
+	"gas-turbine-combustion-ai/handler"
+	"gas-turbine-combustion-ai/sensor"
+	"gas-turbine-combustion-ai/ws"
+
+	"github.com/gin-gonic/gin"
+)
+
+func main() {
+	cfg := config.Default()
+
+	hub := ws.NewHub()
+	go hub.Run()
+
+	simulator := sensor.NewSimulator(cfg)
+	go simulator.Start()
+
+	fusionEngine := fusion.NewFusionEngine(cfg)
+	alarmManager := alarm.NewManager(cfg)
+
+	h := handler.NewHandler(simulator, fusionEngine, alarmManager, hub)
+
+	go dataPipeline(cfg, simulator, fusionEngine, alarmManager, hub)
+
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.Default()
+
+	r.Use(corsMiddleware())
+	h.RegisterRoutes(r)
+	r.GET("/ws", h.HandleWebSocket)
+	r.Static("/assets", "./frontend/dist/assets")
+	r.NoRoute(func(c *gin.Context) {
+		c.File("./frontend/dist/index.html")
+	})
+
+	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
+	log.Printf("🚀 Gas Turbine Combustion AI Server starting on %s", addr)
+	log.Printf("   WebSocket endpoint: ws://%s/ws", addr)
+	log.Printf("   API endpoint: http://%s/api", addr)
+
+	server := &http.Server{
+		Addr:         addr,
+		Handler:      r,
+		ReadTimeout:  time.Duration(cfg.Server.ReadTimeout) * time.Second,
+		WriteTimeout: time.Duration(cfg.Server.WriteTimeout) * time.Second,
+	}
+
+	if err := server.ListenAndServe(); err != nil {
+		log.Fatalf("Server error: %v", err)
+	}
+}
+
+func dataPipeline(cfg *config.Config, sim *sensor.Simulator, fusionEng *fusion.FusionEngine, alarmMgr *alarm.Manager, hub *ws.Hub) {
+	interval := time.Duration(1000.0/cfg.AI.PredictionHz) * time.Millisecond
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		readings := sim.GetReadings()
+		fusionEng.UpdateReadings(readings)
+
+		field := fusionEng.ReconstructTemperatureField()
+		hub.BroadcastMessage("temperature_field", field)
+
+		state := fusionEng.DetectInstability()
+		hub.BroadcastMessage("combustion_state", state)
+
+		efficiency := fusionEng.AnalyzeEfficiency()
+		hub.BroadcastMessage("efficiency", efficiency)
+
+		newAlarms := alarmMgr.Check(readings, state, efficiency)
+		for _, a := range newAlarms {
+			hub.BroadcastMessage("alarm", a)
+		}
+
+		hub.BroadcastMessage("sensors", readings)
+	}
+}
+
+func corsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+		c.Next()
+	}
+}
