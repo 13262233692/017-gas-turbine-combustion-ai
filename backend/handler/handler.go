@@ -48,7 +48,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 }
 
 func (h *Handler) GetSensors(c *gin.Context) {
-	readings := h.simulator.GetReadings()
+	readings := h.simulator.GetAlignedReadings(time.Now())
 	result := make([]*models.SensorReading, 0, len(readings))
 	for _, r := range readings {
 		result = append(result, r)

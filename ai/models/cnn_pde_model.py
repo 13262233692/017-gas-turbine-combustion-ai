@@ -48,23 +48,57 @@ class TemperatureCNN(nn.Module):
 
 
 class PDELayer(nn.Module):
-    def __init__(self, dx=1.0, dt=0.01, alpha=0.5, iterations=5):
+    def __init__(self, dx=1.0, dt=None, alpha=0.5, max_iterations=20,
+                 cfl_safety=0.4, tolerance=1e-4, use_energy_conservation=True):
         super(PDELayer, self).__init__()
         self.dx = dx
         self.dt = dt
-        self.alpha = alpha
-        self.iterations = iterations
+        self.max_iterations = max_iterations
+        self.cfl_safety = cfl_safety
+        self.tolerance = tolerance
+        self.use_energy_conservation = use_energy_conservation
         self.diffusivity = nn.Parameter(torch.tensor(alpha))
 
     def forward(self, temperature):
-        T = temperature
-        for _ in range(self.iterations):
+        T = temperature.clone()
+        batch_size, channels, h, w = T.shape
+
+        if self.dt is None:
+            dt_max = self.cfl_safety * self.dx ** 2 / (2 * torch.abs(self.diffusivity).clamp(min=1e-6))
+            dt = torch.clamp(dt_max, max=0.05).item()
+        else:
+            dt = self.dt
+            cfl = torch.abs(self.diffusivity) * dt / (self.dx ** 2)
+            if cfl > 0.5:
+                dt = 0.4 * self.dx ** 2 / torch.abs(self.diffusivity).clamp(min=1e-6)
+                dt = dt.item()
+
+        initial_energy = None
+        if self.use_energy_conservation:
+            initial_energy = T.sum(dim=(2, 3), keepdim=True).detach()
+
+        residual = float('inf')
+        for iteration in range(self.max_iterations):
+            T_prev = T.clone()
             laplacian = self._laplacian(T)
-            T = T + self.diffusivity * self.dt * laplacian
+            T_new = T + self.diffusivity * dt * laplacian
+
+            if self.use_energy_conservation and initial_energy is not None:
+                current_energy = T_new.sum(dim=(2, 3), keepdim=True)
+                energy_ratio = initial_energy / (current_energy + 1e-8)
+                T_new = T_new * energy_ratio
+
+            T = T_new
+
+            residual = torch.max(torch.abs(T - T_prev)).item()
+            if residual < self.tolerance:
+                break
+
+        self.residual = residual
         return T
 
     def _laplacian(self, T):
-        pad = F.pad(T, (1, 1, 1, 1), mode='replicate')
+        pad = F.pad(T, (1, 1, 1, 1), mode='reflect')
         lap = (
             pad[:, :, 2:, 1:-1] + pad[:, :, :-2, 1:-1] +
             pad[:, :, 1:-1, 2:] + pad[:, :, 1:-1, :-2] -
@@ -74,8 +108,14 @@ class PDELayer(nn.Module):
 
 
 class CNNPDEModel(nn.Module):
-    def __init__(self, in_channels=4, grid_size=16):
+    def __init__(self, in_channels=4, grid_size=16,
+                 min_temp=600.0, max_temp=2200.0, max_gradient=100.0):
         super(CNNPDEModel, self).__init__()
+        self.grid_size = grid_size
+        self.min_temp = min_temp
+        self.max_temp = max_temp
+        self.max_gradient = max_gradient
+
         self.cnn = TemperatureCNN(in_channels, grid_size)
         self.pde = PDELayer()
         self.refine = nn.Sequential(
@@ -89,7 +129,28 @@ class CNNPDEModel(nn.Module):
         pde_out = self.pde(cnn_out)
         combined = torch.cat([cnn_out, pde_out], dim=1)
         refined = self.refine(combined)
+
+        refined = self._apply_physical_constraints(refined)
         return refined
+
+    def _apply_physical_constraints(self, T):
+        T = torch.clamp(T, self.min_temp, self.max_temp)
+
+        for _ in range(2):
+            grad_x = T[:, :, :, 1:] - T[:, :, :, :-1]
+            grad_y = T[:, :, 1:, :] - T[:, :, :-1, :]
+
+            max_grad_x = torch.max(torch.abs(grad_x))
+            max_grad_y = torch.max(torch.abs(grad_y))
+
+            if max_grad_x <= self.max_gradient and max_grad_y <= self.max_gradient:
+                break
+
+            smooth = F.avg_pool2d(T, kernel_size=3, stride=1, padding=1)
+            T = 0.7 * T + 0.3 * smooth
+            T = torch.clamp(T, self.min_temp, self.max_temp)
+
+        return T
 
 
 class InstabilityDetector(nn.Module):

@@ -66,8 +66,9 @@ func dataPipeline(cfg *config.Config, sim *sensor.Simulator, fusionEng *fusion.F
 	defer ticker.Stop()
 
 	for range ticker.C {
-		readings := sim.GetReadings()
-		fusionEng.UpdateReadings(readings)
+		now := time.Now()
+		alignedReadings := sim.GetAlignedReadings(now)
+		fusionEng.UpdateReadings(alignedReadings)
 
 		field := fusionEng.ReconstructTemperatureField()
 		hub.BroadcastMessage("temperature_field", field)
@@ -78,12 +79,12 @@ func dataPipeline(cfg *config.Config, sim *sensor.Simulator, fusionEng *fusion.F
 		efficiency := fusionEng.AnalyzeEfficiency()
 		hub.BroadcastMessage("efficiency", efficiency)
 
-		newAlarms := alarmMgr.Check(readings, state, efficiency)
+		newAlarms := alarmMgr.Check(alignedReadings, state, efficiency)
 		for _, a := range newAlarms {
 			hub.BroadcastMessage("alarm", a)
 		}
 
-		hub.BroadcastMessage("sensors", readings)
+		hub.BroadcastMessage("sensors", alignedReadings)
 	}
 }
 
